@@ -1182,10 +1182,19 @@ def _run_once_per_process():
     return True
 
 
+@st.cache_data(ttl=15)
+def _cached_health_check():
+    """health_check() is a real DB round-trip and previously ran on every
+    single rerun (every click/nav). A 15s cache means a genuinely down DB
+    is still caught within 15 seconds, but normal navigation doesn't pay
+    for a fresh 'SELECT 1' on every click."""
+    return health_check()
+
+
 def main():
     st.set_page_config(page_title=APP_NAME, page_icon="🏫", layout="wide", initial_sidebar_state="auto")
 
-    ok, err = health_check()
+    ok, err = _cached_health_check()
     if not ok:
         inject_css()
         st.error("The database is temporarily unavailable. Please try again shortly.")
