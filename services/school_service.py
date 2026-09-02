@@ -13,7 +13,7 @@ import os
 import random
 from datetime import date, datetime, timedelta
 
-from database.connection import fetch_one, fetch_all, execute
+from database.connection import fetch_one, fetch_all, execute, executemany
 from utils.security import hash_password, generate_license_keys, generate_school_code
 import config
 
@@ -150,12 +150,19 @@ def load_or_create_license_key_file(n_monthly, n_yearly):
 
 def sync_license_keys():
     """Idempotent — safe to call on every app startup. Never invalidates a
-    key that has already been used."""
+    key that has already been used. Uses executemany() (2 round-trips)
+    instead of one execute() per key (100 round-trips for the default 50
+    monthly + 50 yearly) — against a remote DB the per-row version alone
+    was slow enough to make every app restart look hung."""
     monthly, yearly = load_or_create_license_key_file(config.TOTAL_MONTHLY_KEYS, config.TOTAL_YEARLY_KEYS)
-    for k in monthly:
-        execute("INSERT INTO license_keys (license_key, plan_type) VALUES (%s,'monthly') ON CONFLICT DO NOTHING", (k,))
-    for k in yearly:
-        execute("INSERT INTO license_keys (license_key, plan_type) VALUES (%s,'yearly') ON CONFLICT DO NOTHING", (k,))
+    executemany(
+        "INSERT INTO license_keys (license_key, plan_type) VALUES (%s,'monthly') ON CONFLICT DO NOTHING",
+        [(k,) for k in monthly],
+    )
+    executemany(
+        "INSERT INTO license_keys (license_key, plan_type) VALUES (%s,'yearly') ON CONFLICT DO NOTHING",
+        [(k,) for k in yearly],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,52 +237,63 @@ def _clear_demo_sample_data(school_id: int):
 def _seed_demo_sample_data(school_id: int):
     """Seeds a realistic-looking demo school: 5 classes, 25 students spread
     across them, 5 teachers, per-class fee structure, a week of attendance,
-    and a welcome notice."""
+    and a welcome notice.
+
+    Uses executemany() (a handful of round-trips) instead of one execute()
+    per row — against a remote DB (Neon etc.) 200+ sequential round-trips
+    for the full seed can take tens of seconds and make first boot look
+    hung; batching keeps this to about a dozen round-trips total."""
     rng = random.Random(42)  # deterministic — same demo data every reseed
     session = "2025-2026"
 
     class_ids = []
-    for i, grade in enumerate(["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"], start=1):
+    for grade in ["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"]:
         class_id = execute(
             "INSERT INTO classes (school_id, class_name, section, academic_session) "
             "VALUES (%s,%s,'A',%s) RETURNING id",
             (school_id, grade, session),
         )
         class_ids.append(class_id)
-        execute(
-            "INSERT INTO fee_structure (school_id, class_id, fee_head, amount, academic_session) "
-            "VALUES (%s,%s,'Tuition Fee',%s,%s)",
-            (school_id, class_id, 4000 + i * 500, session),
-        )
 
-    student_ids = []
+    executemany(
+        "INSERT INTO fee_structure (school_id, class_id, fee_head, amount, academic_session) "
+        "VALUES (%s,%s,'Tuition Fee',%s,%s)",
+        [(school_id, class_id, 4000 + (i + 1) * 500, session) for i, class_id in enumerate(class_ids)],
+    )
+
+    student_rows = []
     for i in range(1, 26):
         class_id = class_ids[(i - 1) % len(class_ids)]
         full_name = f"{rng.choice(DEMO_FIRST_NAMES)} {rng.choice(DEMO_LAST_NAMES)}"
-        student_id = execute(
-            "INSERT INTO students (school_id, admission_no, student_id, full_name, class_id, "
-            "guardian_phone, status) VALUES (%s,%s,%s,%s,%s,%s,'Active') RETURNING id",
-            (school_id, f"DEMO{i:04d}", f"DEMOSTU{i:03d}", full_name, class_id, f"9876500{i:03d}"),
-        )
-        student_ids.append(student_id)
+        student_rows.append((school_id, f"DEMO{i:04d}", f"DEMOSTU{i:03d}", full_name, class_id, f"9876500{i:03d}"))
+    executemany(
+        "INSERT INTO students (school_id, admission_no, student_id, full_name, class_id, guardian_phone, status) "
+        "VALUES (%s,%s,%s,%s,%s,%s,'Active')",
+        student_rows,
+    )
+    student_ids = [r["id"] for r in fetch_all(
+        "SELECT id FROM students WHERE school_id = %s ORDER BY admission_no", (school_id,))]
 
-    for i in range(1, 6):
-        execute(
-            "INSERT INTO teachers (school_id, employee_code, full_name, phone, status) "
-            "VALUES (%s,%s,%s,%s,'Active')",
-            (school_id, f"DEMOTCH{i:02d}", f"{rng.choice(DEMO_FIRST_NAMES)} {rng.choice(DEMO_LAST_NAMES)}", f"9876000{i:03d}"),
-        )
+    executemany(
+        "INSERT INTO teachers (school_id, employee_code, full_name, phone, status) VALUES (%s,%s,%s,%s,'Active')",
+        [
+            (school_id, f"DEMOTCH{i:02d}", f"{rng.choice(DEMO_FIRST_NAMES)} {rng.choice(DEMO_LAST_NAMES)}", f"9876000{i:03d}")
+            for i in range(1, 6)
+        ],
+    )
 
     today = date.today()
+    attendance_rows = []
     for day_offset in range(7):
         att_date = today - timedelta(days=day_offset)
         for student_id in student_ids:
             status = "Present" if rng.random() > 0.1 else "Absent"
-            execute(
-                "INSERT INTO student_attendance (school_id, student_id, att_date, status) "
-                "VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                (school_id, student_id, att_date, status),
-            )
+            attendance_rows.append((school_id, student_id, att_date, status))
+    executemany(
+        "INSERT INTO student_attendance (school_id, student_id, att_date, status) "
+        "VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+        attendance_rows,
+    )
 
     execute(
         "INSERT INTO notices (school_id, title, description, notice_type, posted_by) "
