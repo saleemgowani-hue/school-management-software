@@ -5,9 +5,12 @@ helpers here (`fetch_one`, `fetch_all`, `execute`, `df`) so there is exactly
 one place that knows how to open a connection, and exactly one style of
 query parameterization (`%s`) used everywhere.
 
-Uses a small connection pool (psycopg2.pool.SimpleConnectionPool) — cheap
+Uses a small connection pool (psycopg2.pool.ThreadedConnectionPool) — cheap
 enough for Streamlit Cloud's single-process model, and avoids re-connecting
-on every query within a session.
+on every query within a session. ThreadedConnectionPool (not
+SimpleConnectionPool) is required because Streamlit serves each session on
+its own thread, and SimpleConnectionPool's getconn/putconn bookkeeping is
+not thread-safe.
 """
 
 from contextlib import contextmanager
@@ -49,7 +52,7 @@ def _build_sqlalchemy_url():
 def get_pool():
     global _pool
     if _pool is None:
-        _pool = pool.SimpleConnectionPool(1, 10, dsn=_build_dsn())
+        _pool = pool.ThreadedConnectionPool(1, 10, dsn=_build_dsn())
     return _pool
 
 
