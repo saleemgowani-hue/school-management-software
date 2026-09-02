@@ -154,7 +154,7 @@ def screen_login():
 
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        tab_signin, tab_register, tab_join = st.tabs(["🔐 Sign In", "🏫 Register School", "👤 Join a School"])
+        tab_signin, tab_register = st.tabs(["🔐 Sign In", "🏫 Register School"])
 
         with tab_signin:
             with st.form("login_form"):
@@ -172,7 +172,7 @@ def screen_login():
             st.caption("Just exploring? Use username **demo** / password **demo1234** — a fully working sample school.")
 
         with tab_register:
-            st.caption("Register your school and get your own Super Admin account. No trial — you'll need a subscription key to start (see 'Get a Key' below).")
+            st.caption("Register your school and get your own Super Admin account. No trial — activate with a subscription key now, or after registering.")
             with st.form("register_form", clear_on_submit=True):
                 school_name = st.text_input("School Name *")
                 col1, col2 = st.columns(2)
@@ -187,6 +187,12 @@ def screen_login():
                 col5, col6 = st.columns(2)
                 admin_password = col5.text_input("Password *", type="password")
                 confirm_password = col6.text_input("Confirm Password *", type="password")
+                st.markdown("---")
+                license_key = st.text_input(
+                    "Subscription Key (optional)",
+                    placeholder="EDU-M-XXXX-XXXX-XXXX (Monthly) or EDU-Y-XXXX-XXXX-XXXX (Yearly)",
+                    help="Have a key already? Enter it here to activate immediately. Otherwise you can activate later after signing in.",
+                )
                 submitted = st.form_submit_button("Register School", use_container_width=True)
                 if submitted:
                     if admin_password != confirm_password:
@@ -195,30 +201,10 @@ def screen_login():
                         ok, msg, school_id = school_svc.register_school(
                             school_name, address, phone, email, principal_name,
                             admin_username, admin_password, admin_full_name)
-                        alert(msg, "success" if ok else "error")
-
-        with tab_join:
-            st.caption("Already have a School Code from your Super Admin? Create your own staff account.")
-            with st.form("join_form", clear_on_submit=True):
-                school_code = st.text_input("School Code *", placeholder="e.g. GVS")
-                full_name = st.text_input("Full Name *")
-                col1, col2 = st.columns(2)
-                new_username = col1.text_input("Choose a Username *")
-                role = col2.selectbox("Role *", SIGNUP_ROLES)
-                email = st.text_input("Email")
-                col3, col4 = st.columns(2)
-                new_password = col3.text_input("Password *", type="password")
-                confirm_password = col4.text_input("Confirm Password *", type="password")
-                submitted = st.form_submit_button("Create My Account", use_container_width=True)
-                if submitted:
-                    from database.connection import fetch_one
-                    school = fetch_one("SELECT id FROM schools WHERE school_code = %s", (school_code.strip().upper(),))
-                    if not school:
-                        alert("School Code not found. Please check with your Super Admin.", "error")
-                    elif new_password != confirm_password:
-                        alert("Passwords do not match.", "error")
-                    else:
-                        ok, msg = signup_user(school["id"], new_username, new_password, full_name, role, email)
+                        if ok and license_key.strip():
+                            key_ok, key_msg = school_svc.activate_subscription(school_id, license_key.strip())
+                            msg = f"{msg} {key_msg}"
+                            ok = ok and key_ok
                         alert(msg, "success" if ok else "error")
 
 
@@ -1013,7 +999,7 @@ def page_settings(sid):
             if submitted:
                 ok, msg = school_svc.update_school_settings(sid, school_name=school_name, phone=phone, email=email, address=address, receipt_footer=receipt_footer)
                 alert(msg, "success" if ok else "error")
-        st.info(f"🔑 Your School Code (share this with new staff for 'Join a School'): **{school['school_code']}**")
+        st.info(f"🔑 Your School Code: **{school['school_code']}**")
 
     with tabs[1]:
         if st.session_state.user["role"] != "Super Admin":
@@ -1038,17 +1024,44 @@ def page_settings(sid):
                         alert(msg, "success" if ok else "error")
                         st.rerun()
 
+            st.markdown("---")
+            st.markdown("##### ➕ Add Staff Account")
+            if school["is_demo"]:
+                st.info("Adding staff accounts is disabled in the Demo account.")
+            else:
+                with st.form("add_staff_form", clear_on_submit=True):
+                    full_name = st.text_input("Full Name *")
+                    col1, col2 = st.columns(2)
+                    new_username = col1.text_input("Username *")
+                    role = col2.selectbox("Role *", SIGNUP_ROLES)
+                    email = st.text_input("Email")
+                    col3, col4 = st.columns(2)
+                    new_password = col3.text_input("Password *", type="password")
+                    confirm_password = col4.text_input("Confirm Password *", type="password")
+                    submitted = st.form_submit_button("Create Staff Account", use_container_width=True)
+                    if submitted:
+                        if new_password != confirm_password:
+                            alert("Passwords do not match.", "error")
+                        else:
+                            ok, msg = signup_user(sid, new_username, new_password, full_name, role, email)
+                            alert(msg, "success" if ok else "error")
+                            if ok:
+                                st.rerun()
+
     with tabs[2]:
-        st.caption(f"Logged in as {st.session_state.user['full_name']} ({st.session_state.user['username']})")
-        with st.form("change_password_form", clear_on_submit=True):
-            current_password = st.text_input("Current Password", type="password")
-            col1, col2 = st.columns(2)
-            new_password = col1.text_input("New Password", type="password")
-            confirm_password = col2.text_input("Confirm New Password", type="password")
-            submitted = st.form_submit_button("Update Password", use_container_width=True)
-            if submitted:
-                ok, msg = change_password(st.session_state.user["id"], current_password, new_password, confirm_password)
-                alert(msg, "success" if ok else "error")
+        if school["is_demo"]:
+            st.info("🔒 Password changes are disabled in the Demo account. Register your own school to manage your password.")
+        else:
+            st.caption(f"Logged in as {st.session_state.user['full_name']} ({st.session_state.user['username']})")
+            with st.form("change_password_form", clear_on_submit=True):
+                current_password = st.text_input("Current Password", type="password")
+                col1, col2 = st.columns(2)
+                new_password = col1.text_input("New Password", type="password")
+                confirm_password = col2.text_input("Confirm New Password", type="password")
+                submitted = st.form_submit_button("Update Password", use_container_width=True)
+                if submitted:
+                    ok, msg = change_password(st.session_state.user["id"], current_password, new_password, confirm_password)
+                    alert(msg, "success" if ok else "error")
 
 
 # ==============================================================================
@@ -1158,6 +1171,17 @@ def sidebar_menu():
         return st.session_state.current_module
 
 
+@st.cache_resource
+def _run_once_per_process():
+    """sync_license_keys()/ensure_demo_school() are idempotent but each does
+    dozens of DB round-trips. They only ever need to run once per app
+    process, not on every Streamlit rerun (every click/nav triggers a full
+    script rerun) — st.cache_resource makes that guarantee."""
+    school_svc.sync_license_keys()
+    school_svc.ensure_demo_school()
+    return True
+
+
 def main():
     st.set_page_config(page_title=APP_NAME, page_icon="🏫", layout="wide", initial_sidebar_state="auto")
 
@@ -1169,8 +1193,7 @@ def main():
             st.code(err or "unknown error")
         return
 
-    school_svc.sync_license_keys()
-    school_svc.ensure_demo_school()
+    _run_once_per_process()
 
     if "user" not in st.session_state:
         screen_login()

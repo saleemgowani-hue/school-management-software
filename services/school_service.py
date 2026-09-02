@@ -10,6 +10,7 @@ school_id as their first parameter — see services/academic_service.py etc.
 """
 
 import os
+import random
 from datetime import date, datetime, timedelta
 
 from database.connection import fetch_one, fetch_all, execute
@@ -161,12 +162,31 @@ def sync_license_keys():
 # Demo account (Phase 8)
 # ---------------------------------------------------------------------------
 
+MIN_DEMO_STUDENTS = 20  # below this, treat the demo school as under-seeded and top it up
+
+DEMO_FIRST_NAMES = [
+    "Aarav", "Vivaan", "Aditya", "Vihaan", "Arjun", "Sai", "Reyansh", "Ayaan", "Krishna", "Ishaan",
+    "Ananya", "Diya", "Saanvi", "Aadhya", "Kiara", "Myra", "Anika", "Navya", "Priya", "Riya",
+]
+DEMO_LAST_NAMES = [
+    "Sharma", "Verma", "Gupta", "Singh", "Kumar", "Patel", "Reddy", "Nair", "Iyer", "Joshi",
+    "Mehta", "Chopra", "Malhotra", "Rao", "Desai",
+]
+
+
 def ensure_demo_school():
     """Idempotent — creates the demo school + demo admin + sample data
-    exactly once. Safe to call on every app startup."""
+    exactly once. Safe to call on every app startup. If a demo school
+    already exists but was seeded by an older, thinner version of this
+    function, top it up to the current sample-data set automatically."""
     existing = fetch_one("SELECT id FROM schools WHERE school_code = %s", (config.DEMO_SCHOOL_CODE,))
     if existing:
-        return existing["id"]
+        school_id = existing["id"]
+        count = fetch_one("SELECT COUNT(*) AS c FROM students WHERE school_id = %s", (school_id,))
+        if not count or count["c"] < MIN_DEMO_STUDENTS:
+            _clear_demo_sample_data(school_id)
+            _seed_demo_sample_data(school_id)
+        return school_id
 
     school_id = execute(
         "INSERT INTO schools (school_code, school_name, address, phone, email, is_demo, "
@@ -184,27 +204,79 @@ def ensure_demo_school():
     return school_id
 
 
+def _clear_demo_sample_data(school_id: int):
+    """Removes everything a previous _seed_demo_sample_data run could have
+    created, in FK-safe order, so it can be reseeded without unique-
+    constraint clashes. Scoped to the demo school_id only."""
+    for stmt in [
+        "DELETE FROM marks WHERE school_id = %s",
+        "DELETE FROM certificates_log WHERE school_id = %s",
+        "DELETE FROM book_issues WHERE school_id = %s",
+        "DELETE FROM hostel_allocations WHERE school_id = %s",
+        "DELETE FROM fee_payments WHERE school_id = %s",
+        "DELETE FROM student_attendance WHERE school_id = %s",
+        "DELETE FROM staff_attendance WHERE school_id = %s",
+        "DELETE FROM exam_subjects WHERE school_id = %s",
+        "DELETE FROM exam_types WHERE school_id = %s",
+        "DELETE FROM fee_structure WHERE school_id = %s",
+        "DELETE FROM students WHERE school_id = %s",
+        "DELETE FROM teachers WHERE school_id = %s",
+        "DELETE FROM notices WHERE school_id = %s",
+        "DELETE FROM classes WHERE school_id = %s",
+    ]:
+        execute(stmt, (school_id,))
+
+
 def _seed_demo_sample_data(school_id: int):
-    class_id = execute(
-        "INSERT INTO classes (school_id, class_name, section, academic_session) "
-        "VALUES (%s,'Grade 5','A','2025-2026') RETURNING id",
-        (school_id,),
-    )
-    execute(
-        "INSERT INTO students (school_id, admission_no, student_id, full_name, class_id, "
-        "guardian_phone, status) VALUES (%s,'DEMO0001','DEMOSTU001','Aarav Sharma',%s,'9876543210','Active')",
-        (school_id, class_id),
-    )
-    execute(
-        "INSERT INTO teachers (school_id, employee_code, full_name, phone, status) "
-        "VALUES (%s,'DEMOTCH01','Priya Verma','9876500000','Active')",
-        (school_id,),
-    )
-    execute(
-        "INSERT INTO fee_structure (school_id, class_id, fee_head, amount, academic_session) "
-        "VALUES (%s,%s,'Tuition Fee',5000,'2025-2026')",
-        (school_id, class_id),
-    )
+    """Seeds a realistic-looking demo school: 5 classes, 25 students spread
+    across them, 5 teachers, per-class fee structure, a week of attendance,
+    and a welcome notice."""
+    rng = random.Random(42)  # deterministic — same demo data every reseed
+    session = "2025-2026"
+
+    class_ids = []
+    for i, grade in enumerate(["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"], start=1):
+        class_id = execute(
+            "INSERT INTO classes (school_id, class_name, section, academic_session) "
+            "VALUES (%s,%s,'A',%s) RETURNING id",
+            (school_id, grade, session),
+        )
+        class_ids.append(class_id)
+        execute(
+            "INSERT INTO fee_structure (school_id, class_id, fee_head, amount, academic_session) "
+            "VALUES (%s,%s,'Tuition Fee',%s,%s)",
+            (school_id, class_id, 4000 + i * 500, session),
+        )
+
+    student_ids = []
+    for i in range(1, 26):
+        class_id = class_ids[(i - 1) % len(class_ids)]
+        full_name = f"{rng.choice(DEMO_FIRST_NAMES)} {rng.choice(DEMO_LAST_NAMES)}"
+        student_id = execute(
+            "INSERT INTO students (school_id, admission_no, student_id, full_name, class_id, "
+            "guardian_phone, status) VALUES (%s,%s,%s,%s,%s,%s,'Active') RETURNING id",
+            (school_id, f"DEMO{i:04d}", f"DEMOSTU{i:03d}", full_name, class_id, f"9876500{i:03d}"),
+        )
+        student_ids.append(student_id)
+
+    for i in range(1, 6):
+        execute(
+            "INSERT INTO teachers (school_id, employee_code, full_name, phone, status) "
+            "VALUES (%s,%s,%s,%s,'Active')",
+            (school_id, f"DEMOTCH{i:02d}", f"{rng.choice(DEMO_FIRST_NAMES)} {rng.choice(DEMO_LAST_NAMES)}", f"9876000{i:03d}"),
+        )
+
+    today = date.today()
+    for day_offset in range(7):
+        att_date = today - timedelta(days=day_offset)
+        for student_id in student_ids:
+            status = "Present" if rng.random() > 0.1 else "Absent"
+            execute(
+                "INSERT INTO student_attendance (school_id, student_id, att_date, status) "
+                "VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                (school_id, student_id, att_date, status),
+            )
+
     execute(
         "INSERT INTO notices (school_id, title, description, notice_type, posted_by) "
         "VALUES (%s,'Welcome to the Demo!','Explore every module — this is sample data only.','Notice','System')",
