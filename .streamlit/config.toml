@@ -1,0 +1,14 @@
+# Pin Streamlit's native widget theme to light. The app already renders its
+# own Light/Dark theme via CSS in app.py's inject_css() — without this file,
+# Streamlit's built-in components (inputs, buttons, tabs) instead follow the
+# visitor's OS/browser dark-mode setting, which clashes with the app's own
+# always-light default and makes inputs/tabs unreadable on phones in dark
+# mode (dark input boxes on a light page, near-invisible unselected tab
+# text).
+[theme]
+base = "light"
+primaryColor = "#6a5cf5"
+backgroundColor = "#f4f6fb"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1c2333"
+font = "sans serif"
